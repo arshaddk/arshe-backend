@@ -44,4 +44,6 @@ app.post("/api/verify-payment", (req, res) => {
     res.json({ success: true })
 })
 
-app.listen(3001, () => console.log("Server running on :3001"))
+app.listen(process.env.PORT || 3001, () =>
+    console.log("Server running")
+)
