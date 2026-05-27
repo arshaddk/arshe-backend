@@ -1,14 +1,43 @@
-// server.js
+// ─────────────────────────────────────────────────────────────────
+//  Arshé Backend — Express + Razorpay + MongoDB Auth
+//  Endpoints:
+//    POST /api/create-order      — Razorpay order creation
+//    POST /api/verify-payment    — Razorpay signature verification
+//    POST /api/auth/signup       — Register new user
+//    POST /api/auth/login        — Login existing user
+//
+//  Environment variables required (set in Railway dashboard):
+//    RAZORPAY_KEY_ID
+//    RAZORPAY_KEY_SECRET
+//    MONGODB_URI       ← from MongoDB Atlas (see README)
+//    JWT_SECRET        ← any long random string e.g. "arshe_super_secret_2025"
+// ─────────────────────────────────────────────────────────────────
+
 import express from "express"
 import Razorpay from "razorpay"
 import crypto from "crypto"
 import cors from "cors"
 import "dotenv/config"
+import { MongoClient } from "mongodb"
+import bcrypt from "bcryptjs"
+import jwt from "jsonwebtoken"
 
 const app = express()
 app.use(cors())
 app.use(express.json())
 
+// ── MONGODB CONNECTION ────────────────────────────────────────────
+let db
+const connectDB = async () => {
+    if (db) return db
+    const client = new MongoClient(process.env.MONGODB_URI)
+    await client.connect()
+    db = client.db("arshe")
+    console.log("MongoDB connected")
+    return db
+}
+
+// ── RAZORPAY ──────────────────────────────────────────────────────
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
     key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -23,6 +52,7 @@ app.post("/api/create-order", async (req, res) => {
         const order = await razorpay.orders.create({ amount, currency, receipt })
         res.json({ order_id: order.id, amount: order.amount, currency: order.currency })
     } catch (err) {
+        console.error("Create order error:", err)
         res.status(500).json({ error: "Order creation failed" })
     }
 })
@@ -44,4 +74,87 @@ app.post("/api/verify-payment", (req, res) => {
     res.json({ success: true })
 })
 
-app.listen(3001, () => console.log("Server running on :3001"))
+// ── AUTH ──────────────────────────────────────────────────────────
+
+// POST /api/auth/signup
+app.post("/api/auth/signup", async (req, res) => {
+    const { name, email, password } = req.body
+
+    if (!email || !password || !name)
+        return res.status(400).json({ error: "Name, email and password are required" })
+    if (password.length < 6)
+        return res.status(400).json({ error: "Password must be at least 6 characters" })
+
+    try {
+        const database = await connectDB()
+        const users = database.collection("users")
+
+        // Check if email already exists
+        const existing = await users.findOne({ email: email.toLowerCase() })
+        if (existing)
+            return res.status(400).json({ error: "An account with this email already exists" })
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 12)
+
+        // Save user
+        const result = await users.insertOne({
+            name,
+            email: email.toLowerCase(),
+            password: hashedPassword,
+            createdAt: new Date(),
+        })
+
+        // Issue JWT
+        const token = jwt.sign(
+            { userId: result.insertedId, email: email.toLowerCase() },
+            process.env.JWT_SECRET,
+            { expiresIn: "30d" }
+        )
+
+        res.status(201).json({ name, email: email.toLowerCase(), token })
+    } catch (err) {
+        console.error("Signup error:", err)
+        res.status(500).json({ error: "Something went wrong. Please try again." })
+    }
+})
+
+// POST /api/auth/login
+app.post("/api/auth/login", async (req, res) => {
+    const { email, password } = req.body
+
+    if (!email || !password)
+        return res.status(400).json({ error: "Email and password are required" })
+
+    try {
+        const database = await connectDB()
+        const users = database.collection("users")
+
+        // Find user
+        const user = await users.findOne({ email: email.toLowerCase() })
+        if (!user)
+            return res.status(401).json({ error: "No account found with this email" })
+
+        // Check password
+        const valid = await bcrypt.compare(password, user.password)
+        if (!valid)
+            return res.status(401).json({ error: "Incorrect password" })
+
+        // Issue JWT
+        const token = jwt.sign(
+            { userId: user._id, email: user.email },
+            process.env.JWT_SECRET,
+            { expiresIn: "30d" }
+        )
+
+        res.json({ name: user.name, email: user.email, token })
+    } catch (err) {
+        console.error("Login error:", err)
+        res.status(500).json({ error: "Something went wrong. Please try again." })
+    }
+})
+
+// ── START ─────────────────────────────────────────────────────────
+app.listen(process.env.PORT || 3001, "0.0.0.0", () =>
+    console.log("Arshé server running on port", process.env.PORT || 3001)
+)
