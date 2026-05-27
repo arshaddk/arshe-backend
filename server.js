@@ -1,10 +1,12 @@
 // ─────────────────────────────────────────────────────────────────
 //  Arshé Backend — Express + Razorpay + MongoDB Auth
 //  Endpoints:
-//    POST /api/create-order      — Razorpay order creation
-//    POST /api/verify-payment    — Razorpay signature verification
-//    POST /api/auth/signup       — Register new user
-//    POST /api/auth/login        — Login existing user
+//    POST  /api/create-order           — Razorpay order creation
+//    POST  /api/verify-payment         — Razorpay signature verification
+//    POST  /api/auth/signup            — Register new user
+//    POST  /api/auth/login             — Login existing user
+//    PATCH /api/auth/update-profile    — Update name / email  [auth required]
+//    POST  /api/auth/change-password   — Change password       [auth required]
 //
 //  Environment variables required (set in Railway dashboard):
 //    RAZORPAY_KEY_ID
@@ -18,7 +20,7 @@ import Razorpay from "razorpay"
 import crypto from "crypto"
 import cors from "cors"
 import "dotenv/config"
-import { MongoClient } from "mongodb"
+import { MongoClient, ObjectId } from "mongodb"
 import bcrypt from "bcryptjs"
 import jwt from "jsonwebtoken"
 
@@ -150,6 +152,90 @@ app.post("/api/auth/login", async (req, res) => {
         res.json({ name: user.name, email: user.email, token })
     } catch (err) {
         console.error("Login error:", err)
+        res.status(500).json({ error: "Something went wrong. Please try again." })
+    }
+})
+
+// ── AUTH MIDDLEWARE ───────────────────────────────────────────────
+// Verifies the Bearer token and attaches decoded payload to req.user
+const requireAuth = (req, res, next) => {
+    const header = req.headers.authorization || ""
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null
+    if (!token)
+        return res.status(401).json({ error: "Authentication required" })
+    try {
+        req.user = jwt.verify(token, process.env.JWT_SECRET)
+        next()
+    } catch {
+        return res.status(401).json({ error: "Invalid or expired token" })
+    }
+}
+
+// PATCH /api/auth/update-profile
+// Body: { name, email }
+app.patch("/api/auth/update-profile", requireAuth, async (req, res) => {
+    const { name, email } = req.body
+
+    if (!name || !name.trim())
+        return res.status(400).json({ error: "Name cannot be empty" })
+    if (!email || !email.includes("@"))
+        return res.status(400).json({ error: "Invalid email address" })
+
+    try {
+        const database = await connectDB()
+        const users = database.collection("users")
+
+        // If email is changing, make sure it isn't taken by another account
+        const newEmail = email.trim().toLowerCase()
+        if (newEmail !== req.user.email) {
+            const conflict = await users.findOne({ email: newEmail })
+            if (conflict)
+                return res.status(400).json({ error: "That email is already in use" })
+        }
+
+        await users.updateOne(
+            { _id: new ObjectId(req.user.userId) },
+            { $set: { name: name.trim(), email: newEmail, updatedAt: new Date() } }
+        )
+
+        res.json({ name: name.trim(), email: newEmail })
+    } catch (err) {
+        console.error("Update profile error:", err)
+        res.status(500).json({ error: "Something went wrong. Please try again." })
+    }
+})
+
+// POST /api/auth/change-password
+// Body: { currentPassword, newPassword }
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+    const { currentPassword, newPassword } = req.body
+
+    if (!currentPassword || !newPassword)
+        return res.status(400).json({ error: "Both current and new password are required" })
+    if (newPassword.length < 6)
+        return res.status(400).json({ error: "New password must be at least 6 characters" })
+
+    try {
+        const database = await connectDB()
+        const users = database.collection("users")
+
+        const user = await users.findOne({ _id: new ObjectId(req.user.userId) })
+        if (!user)
+            return res.status(404).json({ error: "User not found" })
+
+        const valid = await bcrypt.compare(currentPassword, user.password)
+        if (!valid)
+            return res.status(401).json({ error: "Current password is incorrect" })
+
+        const hashed = await bcrypt.hash(newPassword, 12)
+        await users.updateOne(
+            { _id: new ObjectId(req.user.userId) },
+            { $set: { password: hashed, passwordChangedAt: new Date() } }
+        )
+
+        res.json({ success: true })
+    } catch (err) {
+        console.error("Change password error:", err)
         res.status(500).json({ error: "Something went wrong. Please try again." })
     }
 })
